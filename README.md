@@ -39,50 +39,19 @@ Feature Engineering (ATR, gaps, regimes, liquidity)
 └─────────────┘      └────────────┘      └────────────────┘
       │                    │                      │
       ▼                    ▼                      ▼
-proposals.jsonl     challenges.jsonl        decisions.jsonl ──► reports/* (CSV/Sheets)
+tradelogtosheets.csv    recommendations.json    final_decisions.jsonl ──► reports/* (CSV/Sheets)
 ```
 
 **Local + LLM:** Numeric outputs are computed locally (feature store / analytics). LLMs reason over **structured context** and produce human-readable rationales.
 
----
-
-## Repository Structure
-
-```
-tradebot/
-  agents/
-    signal.py
-    risk.py
-    executive.py
-  etl/
-    ingest_prices.py
-    build_features.py
-  backtests/
-    runner.py
-    metrics.py
-  utils/
-    io.py
-    prompts.py
-  configs/
-    strategy.default.yaml
-    env.example
-  data/
-    parquet/           # partitioned features
-    decisions/         # *.jsonl: proposals/challenges/decisions
-  reports/
-    daily/             # CSV summaries (optional Sheets sync)
-  tests/
-    test_*.py
-  README.md
-```
 
 ---
 
 ## Data & Features
 
 - **Primary inputs:** OHLCV bars (provider-agnostic).  
-- **Feature examples:** ATR bands & percentiles; gap stats; regime flags (trend/vol quartiles); session heuristics (DoW/HoD); liquidity screens (ADV/spread).  
 - **Versioning:** Each feature release is stored with the Parquet snapshot to guarantee backtest replayability.
+- **Outputs** All outputs from each trained agent is stored in a json format for future fine tuning.
 
 ---
 
@@ -116,14 +85,6 @@ All agent interactions are recorded with timestamps, model IDs, prompt hashes, a
 
 Enables **forensics** (what was known/assumed) and **audit readiness** across runs.
 
----
-
-## Validation & Backtesting Philosophy
-
-- **Walk-forward evaluation:** Rolling windows; fixed train → shifting test.  
-- **Leakage controls:** No look-ahead; strict partitioning for features/labels.  
-- **Metrics:** CAGR, Sharpe/Sortino, MaxDD, hit rate, avg R:R, EV distribution, slippage sensitivity.  
-- **Agent analytics:** Veto/override rates, common veto reasons, regime-specific performance.
 
 ---
 
@@ -148,29 +109,21 @@ Enables **forensics** (what was known/assumed) and **audit readiness** across ru
 
 Log real trades here. Paste screenshots/links for fast executive review.
 
-### Trade Log (Summary Table)
+### Trade Log 
 
-| Date (UTC) | Symbol | Setup / Thesis | Entry | Stop | Target | R:R | Outcome | EV at Decision | Snapshot | Notes |
-|---|---|---|---:|---:|---:|---:|---|---:|---|---|
-| 2025-09-03 | AAPL | Gap-reversion + ATR-P20 | 198.10 | 194.20 | 203.50 | 1.4 | +0.9R | +0.07 | *(link/image)* | Exec approved; regime neutral |
-| 2025-09-04 | NVDA | Pullback to ATR band | — | — | — | — | — | — | *(add)* | *(add)* |
+Time stamp	        Symbol	Trend	Pattern	      Entry	Stop	Exit	Odds_Score	Strength	Time	Freshness	Trend_Alignment	    Confidence _NEWS	Risk Ratio
+2025-07-17 13:10:00	ASTS	uptrend	DBR	      51.93	51.74	52.65	0.8888888889	Strong	        Strong	Fresh	         With                0.850	         3.8 / 1
 
-### Individual Trade Card (Template)
+<img width="1686" height="915" alt="image" src="https://github.com/user-attachments/assets/79b0ed00-d83c-4e1e-a3ed-05538ab650f1" />
 
-**Symbol / Date:** `TICKER — YYYY-MM-DD`  
-**Setup:** *(one-line thesis)*  
-**Risk Policy Snapshot:** *(active constraints: ATR14 stop, EV gate, exposure cap, liquidity min)*  
-**Executive Rationale (excerpt):**  
-> *(Paste 1–3 lines from `decisions.jsonl` “rationale”.)*
+Time stamp	        Symbol	Trend	Pattern	      Entry	Stop	Exit	Odds_Score	Strength	Time	Freshness	Trend_Alignment	     Confidence _NEWS	Risk Ratio
+2025-07-15 2:50:21	TREX	uptrend	RBR	        60.27	59.68	64.05	0.944	        Strong	        Good	 Fresh	          With	               0	            6.4 / 1
+<img width="1675" height="833" alt="image" src="https://github.com/user-attachments/assets/80878d63-c94b-41a0-8dcd-2f8fb1f7df4a" />
 
-**Numbers:**  
-- Entry: `…`  Stop: `…`  Target: `…`  Size: `…`  
-- EV at decision: `…`  Regime: `…` (e.g., HiVol-Q3)  
-- Outcome: `…` (R multiple and %)
+Time stamp	        Symbol	Trend	   Patter      Entry	Stop	Exit	Odds_Score	Strength	Time	Freshness	Trend_Alignment	     Confidence _NEWS	Risk Ratio
+2025-07-15 6:20:50	BLDR	downtrend  RBD	       132.6	133.35	129.81	0.8888888889	Strong	        Strong	Fresh	        With	                0.6	             3.7 / 1
+<img width="1692" height="826" alt="image" src="https://github.com/user-attachments/assets/eb589d24-b53c-46c0-95d1-7faec53fb863" />
 
-**Artifacts:**  
-- Screenshot: *(embed image)*  
-- Links: *(chart, order ticket, blotter, catalyst)*
 
 ---
 
@@ -193,7 +146,8 @@ Log real trades here. Paste screenshots/links for fast executive review.
 ## Roadmap
 
 - [ ] RFT-aligned Executive (PnL-aware rewards)  
-- [ ] Paper/live broker adapters with event-sourced fills  
+- [ ] Paper/live broker adapters with event-sourced fills
+- [ ] Automated Trade Managment 
 - [ ] Regime-aware prompt/persona shifts  
 - [ ] Intraday microstructure features  
 - [ ] One-click PDF/Slides “Strategy Cards” from logs
