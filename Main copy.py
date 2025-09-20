@@ -22,7 +22,7 @@ symbols = [row[0].strip() for row in ws.get_all_values() if row and row[0].strip
 
 for sym in symbols:
     # risk overrides volatility_threshold, so 0.55 becomes the cut-off
-    decision, score = find_volatility_grok(sym, risk=0.45, verbose=True)
+    decision, score = find_volatility_grok(sym, risk=0.4, verbose=True)
 
     # Always pass both pieces of information to run_bot;
     # inside run_bot a NO_TRADE (Volatility) decision skips pattern detection. 
@@ -32,5 +32,6 @@ for sym in symbols:
         print(decision, score)
     
 print(symbols)
+
 
 
