@@ -21,20 +21,20 @@ from google.oauth2 import service_account # 👈 Add this import
 # ── static config ──────────────────────────────────────────
 RESOLUTION_MIN   = 15         # 0=daily, 5=5-min, etc.
 BARS_PER_PROMPT  = 280
-PROJECT_ID = "ID"  # 
-LOCATION = ""            #
-CREDENTIALS_FILE = ".json" # 
+PROJECT_ID = "id"  # 
+LOCATION = "us-central1"            #
+CREDENTIALS_FILE = "CRed.json" # 
 creds = service_account.Credentials.from_service_account_file(CREDENTIALS_FILE)
 
 vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=creds)
 
-grok_key = ("xai-")
+grok_key = ("xai")
 if not grok_key:
     raise RuntimeError("GROK_API_KEY is not set or is empty")
 
 grok_client = OpenAI(
     api_key=grok_key,
-    base_url="ht/v1",  # your xAI region
+    base_url="https://api.x.ai/v1",  # your xAI region
     timeout=4500,                     # ← raise from 600 s to 3600 s
     max_retries=2                     # optional: retry transient errors
 )
@@ -42,8 +42,8 @@ grok_client = OpenAI(
 CSV_FILE         = "tradelogtosheets.csv"
 AV_KEY           = ""
 OA_KEY           = ""
-KEY_FILE         = ".json"
-SHEET_ID         = "1D5"
+KEY_FILE         = "Credentials.json"
+SHEET_ID         = ""
 DATA_DIR_CANDLES  = "data/candles" 
 DATA_DICT = {}
 FIELDNAMES = [
@@ -51,6 +51,15 @@ FIELDNAMES = [
     "entry","stop","exit","Odds_Score",
     "strength","time","freshness","trend_alignment", "News_Volatility", "Executive"
 ]
+
+
+SIGNAL_ENDPOINT_NAME = "projects/adept-tangent-467005-q0/locations/us-central1/endpoints/(endpoint)"
+RISK_ENDPOINT_NAME   = "projects/adept-tangent-467005-q0/locations/us-central1/endpoints/(endpoint"
+EXEC_ENDPOINT_NAME   = "projects/adept-tangent-467005-q0/locations/us-central1/endpoints/(endpoint)"
+
+
+
+
 
 SYSTEM_PROMPT = """
 You are an advanced Supply-and-Demand Pattern Detector for equities, precisely identifying trade zones using strict breakout and odds enhancer criteria. Do your best to find a zone.
@@ -211,32 +220,27 @@ Never explain yourself. Only respond with the JSON trade object above.""".strip(
 
 
 
-
-def call_vertex_model(model_id: str, system_prompt: str, user_prompt: str) -> str:
+def call_vertex_model(endpoint_name: str, system_prompt: str, user_prompt: str) -> str:
     """
-    Calls a specified Vertex AI Generative Model with system and user prompts.
+    Calls a tuned Gemini endpoint with system and user prompts.
+    Expect endpoint_name like: projects/{PROJECT}/locations/{LOC}/endpoints/{ENDPOINT_ID}
     """
-    # Format the full model path using the provided model_id
-    model_path = f"projects/{PROJECT_ID}/locations/{LOCATION}/models/{model_id}"
-    print(system_prompt)
-    print(user_prompt)
+    # (Optional) minimal sanity check
+    if "/endpoints/" not in endpoint_name:
+        raise ValueError(f"Expected an endpoint name, got: {endpoint_name}")
 
-    # Load your fine-tuned model using the full path
     model = GenerativeModel(
-        model_path,
+        endpoint_name,
         system_instruction=[system_prompt]
     )
-    
-    # Send the prompt and get the response
     response = model.generate_content([user_prompt])
-    
     try:
         return response.text
     except Exception as e:
         print(f"⚠️ Error getting model response: {e}")
-        return "" # Return empty string on failure
-
-
+        return ""
+    
+    
 # ── helper funcs ───────────────────────────────────────────
 
 def fetch_recent_ohlcv(symbol,
@@ -522,7 +526,6 @@ def exec_de(
                signal_json: str,
                candles_df: pd.DataFrame): 
 
-    client = OpenAI(api_key=OA_KEY)
 
     # 0) If the signal fetch itself failed, skip risk analysis
     if signal_json.strip().upper() == "NO_DATA":
@@ -541,9 +544,9 @@ def exec_de(
     EXEC_MODEL_ID = "1206457825274888192" # This is an example, use your tuned model ID
 
     respondos = call_vertex_model(
-    model_id=EXEC_MODEL_ID,
+    endpoint_name=EXEC_ENDPOINT_NAME,
     system_prompt=SYSTEM_PROMPT_EXEC_DECISION,
-    user_prompt=(user_msg)
+    user_prompt= user_msg
 )
     #finalcontent = respondos.choices[0].message.content.strip()
     
@@ -605,9 +608,12 @@ def risk_check(symbol: str,
     RISK_MODEL_ID = "1339314014282317824" # This is an example, use your tuned model ID
 
     resp = call_vertex_model(
-        model_id=RISK_MODEL_ID,
-        system_prompt=SYSTEM_PROMPT_RISK,
-        user_prompt=(user_msg))
+    endpoint_name=RISK_ENDPOINT_NAME,
+    system_prompt=SYSTEM_PROMPT_RISK,
+    user_prompt=build_risk_msg(signal_json, candles_df) + (
+        f"\n\nPREVIOUS_RECOMMENDATION:\n{recommendation}" if recommendation else ""
+    )
+)
 
     #content = resp.choices[0].message.content.strip()
     try:
@@ -658,10 +664,10 @@ def run_sys(symbol: str, vol_score: float):
     SIGNAL_MODEL_ID = "524162481728258048" # This is an example, use your tuned model ID
     firstuserprompt = build_user_msg(candles,symbol)
     sig_reply = call_vertex_model(
-            model_id=SIGNAL_MODEL_ID,
-            system_prompt=SYSTEM_PROMPT,
-            user_prompt=firstuserprompt
-        )
+    endpoint_name=SIGNAL_ENDPOINT_NAME,
+    system_prompt=SYSTEM_PROMPT,
+    user_prompt= firstuserprompt
+)
 
     # quick brace-slice in case the model spills text
     if "{" in sig_reply:
@@ -677,38 +683,40 @@ def run_sys(symbol: str, vol_score: float):
 
     # optional re-eval
     if decision == "reevaluate":
-        # feed hint back to signal bot once
         hint = first_risk["prompt_improvements"]
         full_system_reval = REEVALUATED_SYSTEM_PROMPT.strip() + "\n\n" + hint.strip()
-        print("here we are")
-        user_prompt_reval = build_user_msg(build_user_msg(candles, symbol) + f"\n\n{hint}")
+
+        # FIX: correct user prompt builder (no nested build_user_msg)
+        user_prompt_reval = build_user_msg(candles, symbol) + f"\n\n{hint}"
 
         reevaluated = call_vertex_model(
-        model_id=SIGNAL_MODEL_ID,
-        system_prompt=full_system_reval,
-        user_prompt=user_prompt_reval
-            )#.choices[0].message.content.strip() not sure if I need this or not
-        print(reevaluated)
+            endpoint_name=SIGNAL_ENDPOINT_NAME,
+            system_prompt=full_system_reval,
+            user_prompt=user_prompt_reval
+        )
 
-        if "{" in reevaluated:
-            reevaluated = reevaluated[reevaluated.find("{"): reevaluated.rfind("}") + 1]
-        executivedecision = exec_de(sig_reply, candles)
+    if "{" in reevaluated:
+        reevaluated = reevaluated[reevaluated.find("{"): reevaluated.rfind("}") + 1]
+
+        # FIX: Executive should evaluate the reevaluated signal
+        executivedecision = exec_de(reevaluated, candles)
+
         zone_obj = json.loads(reevaluated)
-        enh    = zone_obj.pop("odds_enhancers", {}) or {}
+        enh = zone_obj.pop("odds_enhancers", {}) or {}
         row.update({
-                "decision":  "TRADE",
-                "reason":    "PASS",
-                "trend":     zone_obj.get("trend"),
-                "pattern":   zone_obj.get("pattern"),
-                "entry":     zone_obj.get("entry"),
-                "stop":      zone_obj.get("stop"),
-                "exit":      zone_obj.get("exit"),
-                "Odds_Score":zone_obj.get("Odds_Score"),
-                "strength":  enh.get("strength"),
-                "time":      enh.get("time"),
-                "freshness": enh.get("freshness"),
-                "trend_alignment": enh.get("trend_alignment"), 
-                "Executive":  executivedecision
+            "decision":  "TRADE",
+            "reason":    "PASS",
+            "trend":     zone_obj.get("trend"),
+            "pattern":   zone_obj.get("pattern"),
+            "entry":     zone_obj.get("entry"),
+            "stop":      zone_obj.get("stop"),
+            "exit":      zone_obj.get("exit"),
+            "Odds_Score":zone_obj.get("Odds_Score"),
+            "strength":  enh.get("strength"),
+            "time":      enh.get("time"),
+            "freshness": enh.get("freshness"),
+            "trend_alignment": enh.get("trend_alignment"),
+            "Executive": executivedecision
         })
         print(row)
     
