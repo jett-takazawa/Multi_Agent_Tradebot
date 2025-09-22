@@ -60,9 +60,8 @@ EXEC_ENDPOINT_NAME   = "projects/adept-tangent-467005-q0/locations/us-central1/e
 
 
 
-
 SYSTEM_PROMPT = """
-You are an advanced Supply-and-Demand Pattern Detector for equities, precisely identifying trade zones using strict breakout and odds enhancer criteria. Do your best to find a zone.
+You are an advanced Supply-and-Demand Pattern Detector for equities, precisely identifying trade zones using strict breakout and odds enhancer criteria. ALWAYS FIND A ZONE.
 
 Allowed Output:
 - JSON object with exactly the following keys:
@@ -242,52 +241,47 @@ def call_vertex_model(endpoint_name: str, system_prompt: str, user_prompt: str) 
     
     
 # ── helper funcs ───────────────────────────────────────────
-
-def fetch_recent_ohlcv(symbol,
-                       resolution_min,
-                       n_bars) -> pd.DataFrame:
-    """
-    Pull `n_bars` most-recent intraday candles, save them as a Parquet
-    file, and return them to the caller.
-    """
+def fetch_recent_ohlcv(symbol, resolution_min, n_bars) -> pd.DataFrame:
     if resolution_min:
         interval = f"{resolution_min}min"
-        url =(
+        url = (
             f"https://www.alphavantage.co/query?"
             f"function=TIME_SERIES_INTRADAY"
             f"&symbol={symbol}"
             f"&interval={interval}"
             f"&outputsize=compact"
             f"&datatype=csv"
-            f"&apikey={AV_KEY}")
+            f"&apikey={AV_KEY}"
+        )
     else:
+        interval = "daily"  # ← define for filename
         url = (
-    "https://www.alphavantage.co/query?"
-    f"function=TIME_SERIES_DAILY_ADJUSTED"   # or TIME_SERIES_DAILY
-    f"&symbol={symbol}"
-    f"&outputsize=compact"                   # 100 most-recent days; use full for full history
-    f"&datatype=csv"
-    f"&apikey={AV_KEY}"
+            "https://www.alphavantage.co/query?"
+            f"function=TIME_SERIES_DAILY_ADJUSTED"
+            f"&symbol={symbol}"
+            f"&outputsize=compact"
+            f"&datatype=csv"
+            f"&apikey={AV_KEY}"
         )
 
     csv_text = requests.get(url, timeout=15).text
     if "Thank you for using" in csv_text or csv_text.startswith("{"):
-        raise RuntimeError("Alpha Vantage throttle/error:\n"+csv_text[:120])
-    df = (pd.read_csv(io.StringIO(csv_text))
-            .iloc[::-1]                 # oldest→newest
-            .tail(n_bars)               # newest n_bars
-            .rename(columns={
-                "timestamp":"t","open":"o","high":"h",
-                "low":"l","close":"c","volume":"v"})
-            .reset_index(drop=True))
-    df["t"] = pd.to_datetime(df["t"]).astype(int)//10**9
-    # ---------- write 1 file per fetch ----------
+        raise RuntimeError("Alpha Vantage throttle/error:\n" + csv_text[:120])
+
+    df = (
+        pd.read_csv(io.StringIO(csv_text))
+          .iloc[::-1]
+          .tail(n_bars)
+          .rename(columns={"timestamp":"t","open":"o","high":"h","low":"l","close":"c","volume":"v"})
+          .reset_index(drop=True)
+    )
+    # Newer pandas: use .view("int64") instead of astype(int)
+    df["t"] = pd.to_datetime(df["t"]).view("int64") // 10**9
 
     os.makedirs(DATA_DIR_CANDLES, exist_ok=True)
     today = dt.date.today().isoformat()
-    path   = f"{DATA_DIR_CANDLES}/{symbol}_{interval}_{today}.parquet"
-
-    df.to_parquet(path, index=False, compression="zstd")   # no append needed"""
+    path = f"{DATA_DIR_CANDLES}/{symbol}_{interval}_{today}.parquet"
+    df.to_parquet(path, index=False, compression="zstd")
     return df
 
 
@@ -342,7 +336,7 @@ SYSTEM_PROMPT_RISK = """
     You are a prompt-engineering and trading coach. Your job is to analyze a given trade
 and return a engineered prompt to advise the trade maker given the candlestick data.
 Try to find an alternative zone or reccomendation trade. Keep it short, concise and deliberate.
-***If final_result = "trade" or "no_trade", prompt_improvements = "null"***
+***If final_result = "trade" or "skip", prompt_improvements = "null"***
 
 Respond ONLY with a JSON object:
 {
@@ -520,41 +514,25 @@ Remember: use the philosophy above to decide if this setup is worth trading.  Th
 
 
 
+def _extract_json_block(s: str) -> str | None:
+    if not s:
+        return None
+    i, j = s.find("{"), s.rfind("}")
+    if i == -1 or j == -1 or j <= i:
+        return None
+    return s[i:j+1]
 
-
-def exec_de(
-               signal_json: str,
-               candles_df: pd.DataFrame): 
-
-
-    # 0) If the signal fetch itself failed, skip risk analysis
+def exec_de(signal_json: str, candles_df: pd.DataFrame):
     if signal_json.strip().upper() == "NO_DATA":
-        return {
-            "prompt_improvements": "",
-            "reevaluation_attempts": 0,
-            "final_result": "no_trade"
-        }
-
-    
-    # 3) Build the user message with whatever signal_json you got
+        return "no_trade"
     user_msg = build_risk_msg(signal_json, candles_df)
-
-    # 4) Call the model
-
-    EXEC_MODEL_ID = "1206457825274888192" # This is an example, use your tuned model ID
-
-    respondos = call_vertex_model(
-    endpoint_name=EXEC_ENDPOINT_NAME,
-    system_prompt=SYSTEM_PROMPT_EXEC_DECISION,
-    user_prompt= user_msg
-)
-    #finalcontent = respondos.choices[0].message.content.strip()
-    
-    print(respondos)
-    
-    return respondos 
-
-
+    reply = call_vertex_model(
+        endpoint_name=EXEC_ENDPOINT_NAME,
+        system_prompt=SYSTEM_PROMPT_EXEC_DECISION,
+        user_prompt=user_msg
+    ) or ""
+    print(reply)
+    return reply.strip().lower() or "no_trade"
 
 
 
@@ -575,253 +553,211 @@ def build_risk_msg(signal_json: str, candles_df: pd.DataFrame) -> str:
         "\n\nRECENT_CANDLES:\n" + candle_block
     )
 
-
 def risk_check(symbol: str,
                signal_json: str,
                candles_df: pd.DataFrame,
                recommendation: str | None = None) -> dict:
-    """
-    Always run the risk LLM unless we truly have NO_DATA.
-    Non-JSON signals (like 'NO_TRADE') will be wrapped in a minimal zone.
-    """
-    client = OpenAI(api_key=OA_KEY)
 
-    # 0) If the signal fetch itself failed, skip risk analysis
     if signal_json.strip().upper() == "NO_DATA":
-        return {
-            "prompt_improvements": "",
-            "final_result": "no_trade"
-        }
+        return {"prompt_improvements": "", "final_result": "skip"}
 
-    # 1) Try to parse the zone JSON; if it fails, fall back to minimal
-    
-    
-    # 2) Build the merged system prompt
-    #full_system = SYSTEM_PROMPT.strip() + "\n\n" + SYSTEM_PROMPT_RISK.strip()
-
-    # 3) Build the user message with whatever signal_json you got
     user_msg = build_risk_msg(signal_json, candles_df)
     if recommendation:
         user_msg += f"\n\nPREVIOUS_RECOMMENDATION:\n{recommendation}"
 
-    # 4) Call the model  #RIGHT HERE SIGNALBOT
-    RISK_MODEL_ID = "1339314014282317824" # This is an example, use your tuned model ID
-
     resp = call_vertex_model(
-    endpoint_name=RISK_ENDPOINT_NAME,
-    system_prompt=SYSTEM_PROMPT_RISK,
-    user_prompt=build_risk_msg(signal_json, candles_df) + (
-        f"\n\nPREVIOUS_RECOMMENDATION:\n{recommendation}" if recommendation else ""
-    )
-)
+        endpoint_name=RISK_ENDPOINT_NAME,
+        system_prompt=SYSTEM_PROMPT_RISK,
+        user_prompt=user_msg
+    ) or ""
 
-    #content = resp.choices[0].message.content.strip()
+    risk_resp = {"prompt_improvements": "", "final_result": "skip"}  # defaults
+    
+    parsed = json.loads(resp)
+    if isinstance(parsed, dict):
+        risk_resp["prompt_improvements"] = parsed.get("prompt_improvements")
+        risk_resp["final_result"] = parsed.get("final_result")
+
+
+    # Save merged record only if signal_json is valid JSON
+    signalinjson = None
     try:
-        risk_resp = json.loads(resp)
         signalinjson = json.loads(signal_json)
-        print(signalinjson)
     except json.JSONDecodeError:
-        risk_resp = {
-            "prompt_improvements": "",
-            "final_result": "no_trade"
-        }
+        signalinjson = None
 
-    # 5) Build & save the recrow
-    
-    signalinjson.update({
-        "prompt_improvements":  risk_resp.get("prompt_improvements",""),
-        "reevaluation_attempts":risk_resp.get("reevaluation_attempts",0),
-        "final_result":         risk_resp["final_result"]
-    })
-    
-    save_reccs(signalinjson)
-    return risk_resp 
+    if isinstance(signalinjson, dict):
+        signalinjson.update({
+            "prompt_improvements":  risk_resp.get("prompt_improvements", ""),
+            "final_result":          risk_resp.get("final_result", "skip"),
+        })
+        try:
+            save_reccs(signalinjson)
+        except Exception as e:
+            print(f"save_reccs failed: {e}")
+
+    return risk_resp
 
 
 
-# --------------------------------------------------------------------
-# 2)  Replace your current run_bot with the version below
-# --------------------------------------------------------------------
+
 def run_sys(symbol: str, vol_score: float):
-    """
-    One complete evaluation cycle:
-      fetch candles ➜ signal bot ➜ risk bot (+ optional re-eval) ➜ persist
-    """
-    client = OpenAI(api_key=OA_KEY)
     row = {c: None for c in FIELDNAMES}
     row.update({"symbol": symbol, "timestamp": dt.datetime.utcnow().isoformat(), "News_Volatility": vol_score})
 
-    # 1) candles -------------------------------------------------------
+    # 1) candles
     try:
         candles = fetch_recent_ohlcv(symbol, RESOLUTION_MIN, BARS_PER_PROMPT)
     except Exception as e:
-        print(f"{symbol}: candle fetch ⚠️  {e}")
-        row.update({"decision": "NO_TRADE", "reason": "NO_DATA"})
-        save_signal(row)
-        return
+        print(f"{symbol}: candle fetch ⚠️ {e}")
+        row.update({"decision": "NO_TRADE", "reason": "NO_DATA", "trend": "null"})
+        save_signal(row); return
 
-    # 2) signal bot ----------------------------------------------------
-    SIGNAL_MODEL_ID = "524162481728258048" # This is an example, use your tuned model ID
-    firstuserprompt = build_user_msg(candles,symbol)
+    # 2) signal
     sig_reply = call_vertex_model(
-    endpoint_name=SIGNAL_ENDPOINT_NAME,
-    system_prompt=SYSTEM_PROMPT,
-    user_prompt= firstuserprompt
-)
+        endpoint_name=SIGNAL_ENDPOINT_NAME,
+        system_prompt=SYSTEM_PROMPT,
+        user_prompt=build_user_msg(candles, symbol)
+    ) or ""
 
-    # quick brace-slice in case the model spills text
-    if "{" in sig_reply:
-        sig_reply = sig_reply[sig_reply.find("{"): sig_reply.rfind("}") + 1]
+    sig_reply_block = _extract_json_block(sig_reply)
+    if not sig_reply_block:
+        # No JSON → skip safely
+        row.update({
+            "decision":"SKIP","reason":"NO_JSON_FROM_SIGNAL","trend":"null",
+            "pattern":"null","entry":"null","stop":"null","exit":"null",
+            "Odds_Score":"null","strength":"null","time":"null",
+            "freshness":"null","trend_alignment":"null","Executive":"no_trade"
+        })
+        save_signal(row); save_exec({"timestamp":row["timestamp"],"symbol":row["symbol"],"Executive":"no_trade"}); return
+    sig_reply = sig_reply_block
 
-    # ------------------------------------------------------------------
-    # 3) first risk pass
-    # ------------------------------------------------------------------
-    print(sig_reply)
+    # 3) risk
     first_risk = risk_check(symbol, sig_reply, candles)
-    print(first_risk)
-    decision   = first_risk["final_result"]
+    decision = first_risk.get("final_result", "no_trade")
+    print(sig_reply); print(first_risk)
 
-    # optional re-eval
+    # 4) act on decision
     if decision == "reevaluate":
-        hint = first_risk["prompt_improvements"]
-        full_system_reval = REEVALUATED_SYSTEM_PROMPT.strip() + "\n\n" + hint.strip()
-
-        # FIX: correct user prompt builder (no nested build_user_msg)
-        user_prompt_reval = build_user_msg(candles, symbol) + f"\n\n{hint}"
+        hint = first_risk.get("prompt_improvements", "")
+        full_system_reval = REEVALUATED_SYSTEM_PROMPT + (("\n\n" + hint.strip()) if hint else "")
+        user_prompt_reval = build_user_msg(candles, symbol) + (f"\n\n{hint}" if hint else "")
 
         reevaluated = call_vertex_model(
             endpoint_name=SIGNAL_ENDPOINT_NAME,
             system_prompt=full_system_reval,
             user_prompt=user_prompt_reval
-        )
+        ) or ""
 
-    if "{" in reevaluated:
-        reevaluated = reevaluated[reevaluated.find("{"): reevaluated.rfind("}") + 1]
-
-        # FIX: Executive should evaluate the reevaluated signal
-        executivedecision = exec_de(reevaluated, candles)
-
-        zone_obj = json.loads(reevaluated)
-        enh = zone_obj.pop("odds_enhancers", {}) or {}
-        row.update({
-            "decision":  "TRADE",
-            "reason":    "PASS",
-            "trend":     zone_obj.get("trend"),
-            "pattern":   zone_obj.get("pattern"),
-            "entry":     zone_obj.get("entry"),
-            "stop":      zone_obj.get("stop"),
-            "exit":      zone_obj.get("exit"),
-            "Odds_Score":zone_obj.get("Odds_Score"),
-            "strength":  enh.get("strength"),
-            "time":      enh.get("time"),
-            "freshness": enh.get("freshness"),
-            "trend_alignment": enh.get("trend_alignment"),
-            "Executive": executivedecision
-        })
-        print(row)
-    
-    
-
-        #second_risk = risk_check(reevaluated, candles, recommendation=hint)
-        #decision    = second_risk["final_result"]
-       # first_risk  = second_risk       # keep the final object
-        # keep the final zone JSON
-
-    # ------------------------------------------------------------------
-    # 4) update row & persist
-    # ------------------------------------------------------------------
+        re_block = _extract_json_block(reevaluated)
+        if not re_block:
+            # fall back to SKIP (don’t reference reevaluated later)
+            row.update({
+                "decision":"SKIP","reason":"NO_JSON_FROM_REEVAL","trend":"null",
+                "pattern":"null","entry":"null","stop":"null","exit":"null",
+                "Odds_Score":"null","strength":"null","time":"null",
+                "freshness":"null","trend_alignment":"null","Executive":"no_trade"
+            })
+        else:
+            reevaluated = re_block
+            executivedecision = exec_de(reevaluated, candles)
+            zone_obj = json.loads(reevaluated)
+            enh = zone_obj.pop("odds_enhancers", {}) or {}
+            row.update({
+                "decision":"TRADE","reason":"PASS",
+                "trend": zone_obj.get("trend","null"),
+                "pattern": zone_obj.get("pattern","null"),
+                "entry": zone_obj.get("entry","null"),
+                "stop":  zone_obj.get("stop","null"),
+                "exit":  zone_obj.get("exit","null"),
+                "Odds_Score": zone_obj.get("Odds_Score","null"),
+                "strength": enh.get("strength","null"),
+                "time":     enh.get("time","null"),
+                "freshness":enh.get("freshness","null"),
+                "trend_alignment": enh.get("trend_alignment","null"),
+                "Executive": executivedecision
+            })
 
     elif decision == "pass":
         executivedecision = exec_de(sig_reply, candles)
         zone_obj = json.loads(sig_reply)
-        enh      = zone_obj.pop("odds_enhancers", {}) or {}
+        enh = zone_obj.pop("odds_enhancers", {}) or {}
         row.update({
-            "decision":  "TRADE",
-            "reason":    "PASS",
-            "pattern":   zone_obj.get("pattern"),
-            "entry":     zone_obj.get("entry"),
-            "stop":      zone_obj.get("stop"),
-            "exit":      zone_obj.get("exit"),
-            "Odds_Score":zone_obj.get("Odds_Score"),
-            "strength":  enh.get("strength"),
-            "time":      enh.get("time"),
-            "freshness": enh.get("freshness"),
-            "trend_alignment": enh.get("trend_alignment"),
-            "Executive":  executivedecision
+            "decision":"TRADE","reason":"PASS",
+            "trend": zone_obj.get("trend","null"),
+            "pattern": zone_obj.get("pattern","null"),
+            "entry": zone_obj.get("entry","null"),
+            "stop":  zone_obj.get("stop","null"),
+            "exit":  zone_obj.get("exit","null"),
+            "Odds_Score": zone_obj.get("Odds_Score","null"),
+            "strength": enh.get("strength","null"),
+            "time":     enh.get("time","null"),
+            "freshness":enh.get("freshness","null"),
+            "trend_alignment": enh.get("trend_alignment","null"),
+            "Executive": executivedecision
         })
 
-    
-
-    elif decision == "skip":
-
-        zone_obj = json.loads(sig_reply)
-        enh      = zone_obj.pop("odds_enhancers", {}) or {}
+    elif decision == "no_trade" or decision == "skip":
         row.update({
-            "decision":  "SKIP",
-            "reason":    "NULL",
-            "pattern":   "null",
-            "entry":     "null",
-            "stop":      "null",
-            "exit":      "null",
-            "Odds_Score":"null",
-            "strength":  "null",
-            "time":      "null",
-            "freshness": "null",
-            "trend_alignment": "null"
+            "decision":"TRADE","reason":"PASS",
+            "trend": zone_obj.get("trend","null"),
+            "pattern": zone_obj.get("pattern","null"),
+            "entry": zone_obj.get("entry","null"),
+            "stop":  zone_obj.get("stop","null"),
+            "exit":  zone_obj.get("exit","null"),
+            "Odds_Score": zone_obj.get("Odds_Score","null"),
+            "strength": enh.get("strength","null"),
+            "time":     enh.get("time","null"),
+            "freshness":enh.get("freshness","null"),
+            "trend_alignment": enh.get("trend_alignment","null"),
+            "Executive": "no_trade"
+        })
+    else:
+        # Unknown label → safe default
+        row.update({
+            "decision":"no_trade","reason":f"UNKNOWN_DECISION:{decision}","trend":"null",
+            "pattern":"null","entry":"null","stop":"null","exit":"null",
+            "Odds_Score":"null","strength":"null","time":"null",
+            "freshness":"null","trend_alignment":"null","Executive":"no_trade"
         })
 
-    
-    
+    # 5) persist (guard against missing keys)
     signalupdate = {
-        "timestamp": row["timestamp"],
-        "symbol":   row["symbol"],
-        "trend":     row["trend"],
-        "pattern":   row["pattern"],
-        "entry":     row["entry"],
-        "stop":      row["stop"],
-        "exit":      row["exit"],
-        "Odds_Score":row["Odds_Score"],
-        "strength":  row["strength"],
-        "time":      row["time"],
-        "freshness": row["freshness"],
-        "trend_alignment": row["trend_alignment"], 
-        "News_Volatility": row["News_Volatility"],
-        "decision":  row["decision"],
-        "reason":    row["reason"],
-    
-    }
+        "timestamp": row.get("timestamp"),
+        "symbol": row.get("symbol"),
+        "trend": row.get("trend","null"),
+        "pattern": row.get("pattern","null"),
+        "entry": row.get("entry","null"),
+        "stop": row.get("stop","null"),
+        "exit": row.get("exit","null"),
+        "Odds_Score": row.get("Odds_Score","null"),
+        "strength": row.get("strength","null"),
+        "time": row.get("time","null"),
+        "freshness": row.get("freshness","null"),
+        "trend_alignment": row.get("trend_alignment","null"),
+        "News_Volatility": row.get("News_Volatility"),
+        "decision": row.get("decision"),
+        "reason": row.get("reason"),
+        "Executive": row.get("Executive","no_trade")
 
+    }
     executiveupdate = {
-        "timestamp": row["timestamp"],
-        "symbol":   row["symbol"],
-        "Executive": row["Executive"]
-    }   
-    save_signal(signalupdate)
-    save_exec(executiveupdate)
-    
-    
-    
-    
-    
-    
+        "timestamp": row.get("timestamp"),
+        "symbol": row.get("symbol"),
+        "Executive": row.get("Executive","no_trade")
+    }
+    save_signal(signalupdate); save_exec(executiveupdate)
+
     try:
         print(f"{symbol:5} → {row['decision']} ({row['reason']})")
-        creds  = Credentials.from_service_account_file(
-        KEY_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        creds = Credentials.from_service_account_file(KEY_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets"])
         sheet1 = gspread.authorize(creds).open_by_key(SHEET_ID).sheet1
-        if sheet1.row_count == 0 or not sheet1.row_values(1):
+        if not sheet1.get_all_values():
             sheet1.append_row(FIELDNAMES, value_input_option="USER_ENTERED")
-        sheet1.append_row([row[c] for c in FIELDNAMES],
-                    value_input_option="USER_ENTERED")
+        sheet1.append_row([signalupdate.get(c, "") for c in FIELDNAMES], value_input_option="USER_ENTERED")
         print("Logged to Google Sheets.")
-    except:
-        print(f"{symbol:5} → {first_risk['final_result']}")
-    
-
-
-
-
-
+    except Exception as e:
+        print(f"{symbol:5} → sheet write warn: {e}")
 
 
 
