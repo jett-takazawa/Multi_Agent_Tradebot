@@ -1,64 +1,3 @@
-#!/usr/bin/env python3
-import os, csv, json, io, time, datetime as dt, requests, pandas as pd
-from openai import OpenAI
-import gspread
-from google.oauth2.service_account import Credentials
-import requests
-from openai import OpenAI
-import pyarrow as pa, pyarrow.parquet as pq
-from typing import List
-from data_manip.Data_Collect import save_signal, save_reccs, save_exec
-# import gspread # Already present
-from google.oauth2.service_account import Credentials
-import vertexai
-from vertexai.generative_models import GenerativeModel, Part
-
-from google.oauth2 import service_account # 👈 Add this import
-
-
-
-
-# ── static config ──────────────────────────────────────────
-RESOLUTION_MIN   = 15         # 0=daily, 5=5-min, etc.
-BARS_PER_PROMPT  = 280
-PROJECT_ID = "id"  # 
-LOCATION = "us-central1"            #
-CREDENTIALS_FILE = "CRed.json" # 
-creds = service_account.Credentials.from_service_account_file(CREDENTIALS_FILE)
-
-vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=creds)
-
-grok_key = ("xai")
-if not grok_key:
-    raise RuntimeError("GROK_API_KEY is not set or is empty")
-
-grok_client = OpenAI(
-    api_key=grok_key,
-    base_url="https://api.x.ai/v1",  # your xAI region
-    timeout=4500,                     # ← raise from 600 s to 3600 s
-    max_retries=2                     # optional: retry transient errors
-)
-
-CSV_FILE         = "tradelogtosheets.csv"
-AV_KEY           = ""
-OA_KEY           = ""
-KEY_FILE         = "Credentials.json"
-SHEET_ID         = ""
-DATA_DIR_CANDLES  = "data/candles" 
-DATA_DICT = {}
-FIELDNAMES = [
-    "timestamp","symbol","trend","pattern",
-    "entry","stop","exit","Odds_Score",
-    "strength","time","freshness","trend_alignment", "News_Volatility", "Executive"
-]
-
-
-SIGNAL_ENDPOINT_NAME = "projects/adept-tangent-467005-q0/locations/us-central1/endpoints/(endpoint)"
-RISK_ENDPOINT_NAME   = "projects/adept-tangent-467005-q0/locations/us-central1/endpoints/(endpoint"
-EXEC_ENDPOINT_NAME   = "projects/adept-tangent-467005-q0/locations/us-central1/endpoints/(endpoint)"
-
-
-
 
 SYSTEM_PROMPT = """
 You are an advanced Supply-and-Demand Pattern Detector for equities, precisely identifying trade zones using strict breakout and odds enhancer criteria. ALWAYS FIND A ZONE.
@@ -514,7 +453,6 @@ Remember: use the philosophy above to decide if this setup is worth trading.  Th
 
 
 
-
 def _extract_json_block(s: str) -> str | None:
     if not s:
         return None
@@ -635,8 +573,9 @@ def run_sys(symbol: str, vol_score: float):
 
     # 3) risk
     first_risk = risk_check(symbol, sig_reply, candles)
-    decision = first_risk.get("final_result", "no_trade")
+    decision = first_risk.get("final_result")
     print(sig_reply); print(first_risk)
+
 
     # 4) act on decision
     if decision == "reevaluate":
@@ -677,8 +616,7 @@ def run_sys(symbol: str, vol_score: float):
                 "trend_alignment": enh.get("trend_alignment","null"),
                 "Executive": executivedecision,
                 "prompt_improvement": first_risk.get("prompt_improvements"),
-                "risk": "reevaluate"
-                
+                "risk": "reevaluate",
             })
 
     elif decision == "pass":
@@ -741,8 +679,6 @@ def run_sys(symbol: str, vol_score: float):
         "freshness": row.get("freshness","null"),
         "trend_alignment": row.get("trend_alignment","null"),
         "News_Volatility": row.get("News_Volatility"),
-        "decision": row.get("decision"),
-        "reason": row.get("reason"),
         "Executive": row.get("Executive","no_trade"),
     }
 
@@ -760,7 +696,6 @@ def run_sys(symbol: str, vol_score: float):
         "freshness": row.get("freshness","null"),
         "trend_alignment": row.get("trend_alignment","null"),
         "News_Volatility": row.get("News_Volatility"),
-        "decision": row.get("decision"),
         "reason": row.get("reason"),
         "Executive": row.get("Executive","no_trade"),
         "Prompt_improvements": row.get("prompt_improvement"),
@@ -772,18 +707,22 @@ def run_sys(symbol: str, vol_score: float):
         "symbol": row.get("symbol"),
         "Executive": row.get("Executive","no_trade")
     }
+    
     save_signal(signalupdate); save_exec(executiveupdate)
 
-    try:
-        print(f"{symbol:5} → {row['decision']} ({row['reason']})")
-        creds = Credentials.from_service_account_file(KEY_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets"])
-        sheet1 = gspread.authorize(creds).open_by_key(SHEET_ID).sheet1
-        if not sheet1.get_all_values():
-            sheet1.append_row(FIELDNAMES, value_input_option="USER_ENTERED")
-        sheet1.append_row([to_sheets.get(c, "") for c in FIELDNAMES], value_input_option="USER_ENTERED")
-        print("Logged to Google Sheets.")
-    except Exception as e:
-        print(f"{symbol:5} → sheet write warn: {e}")
+    if (executiveupdate.get("Executive") or "").lower() == "no_trade":
+        pass
+    else:
+        resp = execute_from_row(to_sheets, risk_dollars=500, send=True)
+        print(json.dumps(resp, indent=2))
+
+    
+    creds = Credentials.from_service_account_file(KEY_FILE, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    sheet1 = gspread.authorize(creds).open_by_key(SHEET_ID).sheet1
+    if not sheet1.get_all_values():
+        sheet1.append_row(FIELDNAMES, value_input_option="USER_ENTERED")
+    sheet1.append_row([to_sheets.get(c) for c in FIELDNAMES], value_input_option="USER_ENTERED")
+    print("Logged to Google Sheets.")
 
 
 
