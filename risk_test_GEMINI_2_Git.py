@@ -514,6 +514,7 @@ Remember: use the philosophy above to decide if this setup is worth trading.  Th
 
 
 
+
 def _extract_json_block(s: str) -> str | None:
     if not s:
         return None
@@ -643,13 +644,13 @@ def run_sys(symbol: str, vol_score: float):
         full_system_reval = REEVALUATED_SYSTEM_PROMPT + (("\n\n" + hint.strip()) if hint else "")
         user_prompt_reval = build_user_msg(candles, symbol) + (f"\n\n{hint}" if hint else "")
 
-        reevaluated = call_vertex_model(
+        reevaluated = call_vertex_model( #reevaluate here
             endpoint_name=SIGNAL_ENDPOINT_NAME,
             system_prompt=full_system_reval,
             user_prompt=user_prompt_reval
         ) or ""
 
-        re_block = _extract_json_block(reevaluated)
+        re_block = _extract_json_block(reevaluated) 
         if not re_block:
             # fall back to SKIP (don’t reference reevaluated later)
             row.update({
@@ -660,11 +661,10 @@ def run_sys(symbol: str, vol_score: float):
             })
         else:
             reevaluated = re_block
-            executivedecision = exec_de(reevaluated, candles)
+            executivedecision = exec_de(reevaluated, candles) #executive decision
             zone_obj = json.loads(reevaluated)
             enh = zone_obj.pop("odds_enhancers", {}) or {}
             row.update({
-                "decision":"TRADE","reason":"PASS",
                 "trend": zone_obj.get("trend","null"),
                 "pattern": zone_obj.get("pattern","null"),
                 "entry": zone_obj.get("entry","null"),
@@ -675,15 +675,17 @@ def run_sys(symbol: str, vol_score: float):
                 "time":     enh.get("time","null"),
                 "freshness":enh.get("freshness","null"),
                 "trend_alignment": enh.get("trend_alignment","null"),
-                "Executive": executivedecision
+                "Executive": executivedecision,
+                "prompt_improvement": first_risk.get("prompt_improvements"),
+                "risk": "reevaluate"
+                
             })
 
     elif decision == "pass":
-        executivedecision = exec_de(sig_reply, candles)
+        executivedecision = exec_de(sig_reply, candles) #Check executive 
         zone_obj = json.loads(sig_reply)
         enh = zone_obj.pop("odds_enhancers", {}) or {}
         row.update({
-            "decision":"TRADE","reason":"PASS",
             "trend": zone_obj.get("trend","null"),
             "pattern": zone_obj.get("pattern","null"),
             "entry": zone_obj.get("entry","null"),
@@ -694,12 +696,13 @@ def run_sys(symbol: str, vol_score: float):
             "time":     enh.get("time","null"),
             "freshness":enh.get("freshness","null"),
             "trend_alignment": enh.get("trend_alignment","null"),
-            "Executive": executivedecision
+            "Executive": executivedecision,
+            "prompt_improvement": first_risk.get("prompt_improvements"),
+            "risk" : "pass"
         })
 
     elif decision == "no_trade" or decision == "skip":
         row.update({
-            "decision":"TRADE","reason":"PASS",
             "trend": zone_obj.get("trend","null"),
             "pattern": zone_obj.get("pattern","null"),
             "entry": zone_obj.get("entry","null"),
@@ -710,15 +713,17 @@ def run_sys(symbol: str, vol_score: float):
             "time":     enh.get("time","null"),
             "freshness":enh.get("freshness","null"),
             "trend_alignment": enh.get("trend_alignment","null"),
-            "Executive": "no_trade"
+            "Executive": "no_trade",
+            "prompt_improvement":  "",
+            "risk": "skip"
         })
     else:
         # Unknown label → safe default
         row.update({
-            "decision":"no_trade","reason":f"UNKNOWN_DECISION:{decision}","trend":"null",
+            "trend":"null",
             "pattern":"null","entry":"null","stop":"null","exit":"null",
             "Odds_Score":"null","strength":"null","time":"null",
-            "freshness":"null","trend_alignment":"null","Executive":"no_trade"
+            "freshness":"null","trend_alignment":"null","Executive":"no_trade", "risk": "err"
         })
 
     # 5) persist (guard against missing keys)
@@ -738,7 +743,28 @@ def run_sys(symbol: str, vol_score: float):
         "News_Volatility": row.get("News_Volatility"),
         "decision": row.get("decision"),
         "reason": row.get("reason"),
-        "Executive": row.get("Executive","no_trade")
+        "Executive": row.get("Executive","no_trade"),
+    }
+
+    to_sheets = {
+        "timestamp": row.get("timestamp"),
+        "symbol": row.get("symbol"),
+        "trend": row.get("trend","null"),
+        "pattern": row.get("pattern","null"),
+        "entry": row.get("entry","null"),
+        "stop": row.get("stop","null"),
+        "exit": row.get("exit","null"),
+        "Odds_Score": row.get("Odds_Score","null"),
+        "strength": row.get("strength","null"),
+        "time": row.get("time","null"),
+        "freshness": row.get("freshness","null"),
+        "trend_alignment": row.get("trend_alignment","null"),
+        "News_Volatility": row.get("News_Volatility"),
+        "decision": row.get("decision"),
+        "reason": row.get("reason"),
+        "Executive": row.get("Executive","no_trade"),
+        "Prompt_improvements": row.get("prompt_improvement"),
+        "risk_decision": row.get("risk")
 
     }
     executiveupdate = {
@@ -754,7 +780,7 @@ def run_sys(symbol: str, vol_score: float):
         sheet1 = gspread.authorize(creds).open_by_key(SHEET_ID).sheet1
         if not sheet1.get_all_values():
             sheet1.append_row(FIELDNAMES, value_input_option="USER_ENTERED")
-        sheet1.append_row([signalupdate.get(c, "") for c in FIELDNAMES], value_input_option="USER_ENTERED")
+        sheet1.append_row([to_sheets.get(c, "") for c in FIELDNAMES], value_input_option="USER_ENTERED")
         print("Logged to Google Sheets.")
     except Exception as e:
         print(f"{symbol:5} → sheet write warn: {e}")
